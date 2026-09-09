@@ -72,7 +72,7 @@ func (h *WS) read(ctx context.Context, conn *websocket.Conn, client *relay.Clien
 			log.Printf("'%s' joined", client.Name())
 			h.Hub.BroadcastPresence()
 
-		case relay.KindMessage, relay.KindTyping:
+		case relay.KindMessage, relay.KindTyping, relay.KindStroke:
 			if !client.HasIntroduced() {
 				continue // не представился — не обслуживаем
 			}

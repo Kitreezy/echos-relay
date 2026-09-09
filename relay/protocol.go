@@ -15,6 +15,10 @@ const (
 
 	KindMessage Kind = "message"
 	KindTyping  Kind = "typing"
+
+	// KindStroke — росчерк на стене. Сервер, как и с сообщениями, содержимое
+	// не разбирает: точки лежат в payload и его не касаются.
+	KindStroke Kind = "stroke"
 )
 
 // Envelope — то, что ходит по сокету.
