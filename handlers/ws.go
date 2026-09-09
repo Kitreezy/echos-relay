@@ -84,6 +84,17 @@ func (h *WS) read(ctx context.Context, conn *websocket.Conn, client *relay.Clien
 				log.Printf("encode failed: %v", err)
 				continue
 			}
+
+			// Адресный конверт уходит одному. Остальных он не касается:
+			// росчерк на стене Bob — не дело Carol.
+			if envelope.Recipient != "" {
+				if !h.Hub.RelayTo(stamped, envelope.Recipient, client) {
+					log.Printf("'%s' is not here, dropping %s from '%s'",
+						envelope.Recipient, envelope.Kind, client.Name())
+				}
+				continue
+			}
+
 			h.Hub.Relay(stamped, client)
 
 		case relay.KindPresence:

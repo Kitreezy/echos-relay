@@ -258,3 +258,103 @@ func TestHealth(t *testing.T) {
 		t.Fatalf("expected 200, got %d", response.StatusCode)
 	}
 }
+
+// Адресная доставка: росчерк предназначен одному и остальных не касается.
+func TestAddressedEnvelopeReachesOnlyRecipient(t *testing.T) {
+	url := startRelay(t)
+
+	alice := dial(t, url)
+	bob := dial(t, url)
+	carol := dial(t, url)
+
+	send(t, alice, hello("Alice"))
+	send(t, bob, hello("Bob"))
+	send(t, carol, hello("Carol"))
+	receiveKind(t, carol, relay.KindPresence)
+
+	send(t, alice, relay.Envelope{
+		Kind:      relay.KindStroke,
+		Sender:    "Alice",
+		Recipient: "Bob",
+		Payload:   []byte(`{"points":[]}`),
+	})
+
+	// Bob получает
+	envelope := receiveKind(t, bob, relay.KindStroke)
+	if envelope.Sender != "Alice" {
+		t.Fatalf("expected Alice, got %q", envelope.Sender)
+	}
+
+	// Carol — нет
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	for {
+		_, data, err := carol.Read(ctx)
+		if err != nil {
+			return // тишина — то что нужно
+		}
+
+		decoded, err := relay.Decode(data)
+		if err == nil && decoded.Kind == relay.KindStroke {
+			t.Fatal("addressed stroke leaked to a third party")
+		}
+	}
+}
+
+// Конверт без получателя ведёт себя как раньше — уходит всем.
+func TestEnvelopeWithoutRecipientStillBroadcasts(t *testing.T) {
+	url := startRelay(t)
+
+	alice := dial(t, url)
+	bob := dial(t, url)
+	carol := dial(t, url)
+
+	send(t, alice, hello("Alice"))
+	send(t, bob, hello("Bob"))
+	send(t, carol, hello("Carol"))
+	receiveKind(t, carol, relay.KindPresence)
+
+	send(t, alice, relay.Envelope{
+		Kind:    relay.KindMessage,
+		Sender:  "Alice",
+		Payload: []byte(`{}`),
+	})
+
+	receiveKind(t, bob, relay.KindMessage)
+	receiveKind(t, carol, relay.KindMessage)
+}
+
+// Получателя нет на релее — конверт не должен уйти кому-то другому.
+func TestEnvelopeForAbsentRecipientIsDropped(t *testing.T) {
+	url := startRelay(t)
+
+	alice := dial(t, url)
+	bob := dial(t, url)
+
+	send(t, alice, hello("Alice"))
+	send(t, bob, hello("Bob"))
+	receiveKind(t, bob, relay.KindPresence)
+
+	send(t, alice, relay.Envelope{
+		Kind:      relay.KindStroke,
+		Sender:    "Alice",
+		Recipient: "Nobody",
+		Payload:   []byte(`{"points":[]}`),
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	for {
+		_, data, err := bob.Read(ctx)
+		if err != nil {
+			return
+		}
+
+		decoded, err := relay.Decode(data)
+		if err == nil && decoded.Kind == relay.KindStroke {
+			t.Fatal("stroke for an absent recipient was delivered to someone else")
+		}
+	}
+}

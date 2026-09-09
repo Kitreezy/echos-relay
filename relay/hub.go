@@ -145,6 +145,24 @@ func (h *Hub) Relay(data []byte, from *Client) {
 	}
 }
 
+// RelayTo отправляет конверт одному получателю.
+//
+// Если такого имени на релее нет, конверт молча пропадает: очереди для
+// отсутствующих мы не держим, а клиент всё равно сохранил росчерк у себя.
+func (h *Hub) RelayTo(data []byte, recipient string, from *Client) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for _, client := range h.clients {
+		if client.ID != from.ID && client.Name() == recipient {
+			h.enqueue(client, data)
+			return true
+		}
+	}
+
+	return false
+}
+
 // enqueue кладёт в очередь клиента, не блокируясь.
 //
 // Если очередь переполнена, клиент не успевает читать — рассылка не должна
