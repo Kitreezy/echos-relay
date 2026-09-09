@@ -20,9 +20,9 @@ type WS struct {
 
 func (h *WS) Serve(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// Нативный клиент заголовок Origin не шлёт, а проверять его всё равно
-		// нечего: у релея пока нет авторизации, и назваться можно кем угодно.
-		// Когда появится токен, проверка переедет туда.
+		// Нативный клиент заголовок Origin не шлёт, а браузеров у нас нет —
+		// проверять его нечего. Кто подключился, решает не заголовок, а
+		// подпись в hello.
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
@@ -32,7 +32,15 @@ func (h *WS) Serve(w http.ResponseWriter, r *http.Request) {
 
 	conn.SetReadLimit(h.Cfg.MaxMessageBytes)
 
+	nonce, err := relay.NewNonce()
+	if err != nil {
+		log.Printf("nonce failed: %v", err)
+		conn.Close(websocket.StatusInternalError, "nonce failed")
+		return
+	}
+
 	client := h.Hub.Add()
+	client.Nonce = nonce
 	defer h.Hub.Remove(client)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -40,6 +48,12 @@ func (h *WS) Serve(w http.ResponseWriter, r *http.Request) {
 
 	go h.write(ctx, conn, client)
 	go h.keepAlive(ctx, conn, client)
+	go h.dropIfSilent(ctx, conn, client)
+
+	// Вызов уходит первым: клиент ждёт его, чтобы было что подписать.
+	if challenge, err := relay.ChallengeEnvelope(nonce).Encode(); err == nil {
+		client.Send <- challenge
+	}
 
 	h.read(ctx, conn, client)
 
@@ -65,11 +79,15 @@ func (h *WS) read(ctx context.Context, conn *websocket.Conn, client *relay.Clien
 
 		switch envelope.Kind {
 		case relay.KindHello:
-			if envelope.Sender == "" {
-				continue
+			if client.HasIntroduced() {
+				continue // уже представился, второй раз не нужно
 			}
-			client.SetName(envelope.Sender)
-			log.Printf("'%s' joined", client.Name())
+
+			if !h.authenticate(conn, client, envelope) {
+				return
+			}
+
+			log.Printf("'%s' joined (%s)", client.Name(), client.Fingerprint())
 			h.Hub.BroadcastPresence()
 
 		case relay.KindMessage, relay.KindTyping, relay.KindStroke:
@@ -97,8 +115,59 @@ func (h *WS) read(ctx context.Context, conn *websocket.Conn, client *relay.Clien
 
 			h.Hub.Relay(stamped, client)
 
-		case relay.KindPresence:
-			// Присутствие рассылает только сервер.
+		case relay.KindPresence, relay.KindChallenge:
+			// И то и другое рассылает только сервер.
+		}
+	}
+}
+
+// authenticate проверяет hello: подпись под выданным nonce и право на имя.
+//
+// Отказ означает разрыв соединения, а не пропуск конверта. Клиент, который
+// не смог подтвердить имя, не станет обслуживаемым позже — держать его на
+// линии не за чем, а закрытие он увидит сразу.
+func (h *WS) authenticate(conn *websocket.Conn, client *relay.Client, envelope relay.Envelope) bool {
+	if envelope.Sender == "" {
+		conn.Close(websocket.StatusPolicyViolation, "empty name")
+		return false
+	}
+
+	hello, err := relay.DecodeHello(envelope.Payload)
+	if err != nil {
+		log.Printf("bad hello from '%s': %v", envelope.Sender, err)
+		conn.Close(websocket.StatusPolicyViolation, "bad hello")
+		return false
+	}
+
+	if !relay.VerifySignature(hello.PublicKey, client.Nonce, hello.Signature) {
+		log.Printf("'%s' failed the challenge", envelope.Sender)
+		conn.Close(websocket.StatusPolicyViolation, "bad signature")
+		return false
+	}
+
+	if err := h.Hub.Claim(envelope.Sender, hello.PublicKey, client); err != nil {
+		log.Printf("'%s' rejected: %v", envelope.Sender, err)
+		conn.Close(websocket.StatusPolicyViolation, err.Error())
+		return false
+	}
+
+	return true
+}
+
+// dropIfSilent закрывает соединение, если клиент так и не представился.
+//
+// Без этого любой открытый сокет висел бы до бесконечности: неподтверждённых
+// мы не пингуем ответом и ничего им не шлём, так что сами они не отвалятся.
+func (h *WS) dropIfSilent(ctx context.Context, conn *websocket.Conn, client *relay.Client) {
+	timer := time.NewTimer(h.Cfg.AuthTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+		if !client.HasIntroduced() {
+			log.Printf("client %d did not introduce itself, closing", client.ID)
+			conn.Close(websocket.StatusPolicyViolation, "no hello")
 		}
 	}
 }

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +25,7 @@ func startRelay(t *testing.T) string {
 	cfg := config.Load()
 	cfg.PingInterval = 100 * time.Millisecond
 	cfg.PongTimeout = time.Second
+	cfg.AuthTimeout = 500 * time.Millisecond
 
 	ws := &handlers.WS{Hub: relay.NewHub(), Cfg: cfg}
 
@@ -91,8 +94,40 @@ func receiveKind(t *testing.T, conn *websocket.Conn, kind relay.Kind) relay.Enve
 	}
 }
 
-func hello(name string) relay.Envelope {
-	return relay.Envelope{Kind: relay.KindHello, Sender: name}
+// keyFor — устойчивая пара ключей на имя.
+//
+// В тестах «тот же Alice» должен приходить с тем же ключом, что и в прошлый
+// раз, иначе переподключение выглядело бы как попытка занять чужое имя.
+func keyFor(name string) (ed25519.PublicKey, ed25519.PrivateKey) {
+	seed := sha256.Sum256([]byte(name))
+	private := ed25519.NewKeyFromSeed(seed[:])
+	return private.Public().(ed25519.PublicKey), private
+}
+
+// introduce проходит рукопожатие целиком: дожидается вызова и отвечает
+// подписью под ним.
+func introduce(t *testing.T, conn *websocket.Conn, name string) {
+	t.Helper()
+
+	public, private := keyFor(name)
+	introduceWithKey(t, conn, name, public, private)
+}
+
+func introduceWithKey(t *testing.T, conn *websocket.Conn, name string,
+	public ed25519.PublicKey, private ed25519.PrivateKey) {
+	t.Helper()
+
+	challenge := receiveKind(t, conn, relay.KindChallenge)
+
+	payload, err := json.Marshal(relay.HelloPayload{
+		PublicKey: public,
+		Signature: ed25519.Sign(private, challenge.Payload),
+	})
+	if err != nil {
+		t.Fatalf("hello payload failed: %v", err)
+	}
+
+	send(t, conn, relay.Envelope{Kind: relay.KindHello, Sender: name, Payload: payload})
 }
 
 func TestPresenceListsEveryoneWhoIntroducedThemselves(t *testing.T) {
@@ -101,8 +136,8 @@ func TestPresenceListsEveryoneWhoIntroducedThemselves(t *testing.T) {
 	alice := dial(t, url)
 	bob := dial(t, url)
 
-	send(t, alice, hello("Alice"))
-	send(t, bob, hello("Bob"))
+	introduce(t, alice, "Alice")
+	introduce(t, bob, "Bob")
 
 	envelope := receiveKind(t, alice, relay.KindPresence)
 
@@ -130,8 +165,8 @@ func TestMessageReachesTheOtherClient(t *testing.T) {
 	alice := dial(t, url)
 	bob := dial(t, url)
 
-	send(t, alice, hello("Alice"))
-	send(t, bob, hello("Bob"))
+	introduce(t, alice, "Alice")
+	introduce(t, bob, "Bob")
 	receiveKind(t, bob, relay.KindPresence)
 
 	send(t, alice, relay.Envelope{
@@ -155,8 +190,8 @@ func TestSenderIsStampedByServer(t *testing.T) {
 	mallory := dial(t, url)
 	bob := dial(t, url)
 
-	send(t, mallory, hello("Mallory"))
-	send(t, bob, hello("Bob"))
+	introduce(t, mallory, "Mallory")
+	introduce(t, bob, "Bob")
 	receiveKind(t, bob, relay.KindPresence)
 
 	send(t, mallory, relay.Envelope{
@@ -178,7 +213,7 @@ func TestMessageFromUnintroducedClientIsIgnored(t *testing.T) {
 	stranger := dial(t, url)
 	bob := dial(t, url)
 
-	send(t, bob, hello("Bob"))
+	introduce(t, bob, "Bob")
 	receiveKind(t, bob, relay.KindPresence)
 
 	// Незнакомец пишет, не представившись.
@@ -201,7 +236,7 @@ func TestSenderDoesNotReceiveItsOwnMessage(t *testing.T) {
 	url := startRelay(t)
 
 	alice := dial(t, url)
-	send(t, alice, hello("Alice"))
+	introduce(t, alice, "Alice")
 	receiveKind(t, alice, relay.KindPresence)
 
 	send(t, alice, relay.Envelope{
@@ -224,8 +259,8 @@ func TestLeavingUpdatesPresence(t *testing.T) {
 	alice := dial(t, url)
 	bob := dial(t, url)
 
-	send(t, alice, hello("Alice"))
-	send(t, bob, hello("Bob"))
+	introduce(t, alice, "Alice")
+	introduce(t, bob, "Bob")
 	receiveKind(t, alice, relay.KindPresence)
 
 	bob.Close(websocket.StatusNormalClosure, "")
@@ -267,9 +302,9 @@ func TestAddressedEnvelopeReachesOnlyRecipient(t *testing.T) {
 	bob := dial(t, url)
 	carol := dial(t, url)
 
-	send(t, alice, hello("Alice"))
-	send(t, bob, hello("Bob"))
-	send(t, carol, hello("Carol"))
+	introduce(t, alice, "Alice")
+	introduce(t, bob, "Bob")
+	introduce(t, carol, "Carol")
 	receiveKind(t, carol, relay.KindPresence)
 
 	send(t, alice, relay.Envelope{
@@ -310,9 +345,9 @@ func TestEnvelopeWithoutRecipientStillBroadcasts(t *testing.T) {
 	bob := dial(t, url)
 	carol := dial(t, url)
 
-	send(t, alice, hello("Alice"))
-	send(t, bob, hello("Bob"))
-	send(t, carol, hello("Carol"))
+	introduce(t, alice, "Alice")
+	introduce(t, bob, "Bob")
+	introduce(t, carol, "Carol")
 	receiveKind(t, carol, relay.KindPresence)
 
 	send(t, alice, relay.Envelope{
@@ -332,8 +367,8 @@ func TestEnvelopeForAbsentRecipientIsDropped(t *testing.T) {
 	alice := dial(t, url)
 	bob := dial(t, url)
 
-	send(t, alice, hello("Alice"))
-	send(t, bob, hello("Bob"))
+	introduce(t, alice, "Alice")
+	introduce(t, bob, "Bob")
 	receiveKind(t, bob, relay.KindPresence)
 
 	send(t, alice, relay.Envelope{
@@ -356,5 +391,110 @@ func TestEnvelopeForAbsentRecipientIsDropped(t *testing.T) {
 		if err == nil && decoded.Kind == relay.KindStroke {
 			t.Fatal("stroke for an absent recipient was delivered to someone else")
 		}
+	}
+}
+
+func TestUnsignedHelloIsRejected(t *testing.T) {
+	url := startRelay(t)
+
+	impostor := dial(t, url)
+	receiveKind(t, impostor, relay.KindChallenge)
+
+	// Имя есть, подписи нет.
+	send(t, impostor, relay.Envelope{Kind: relay.KindHello, Sender: "Alice"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if _, _, err := impostor.Read(ctx); err == nil {
+		t.Fatal("client without a signature stayed connected")
+	}
+}
+
+func TestSignatureFromAnotherChallengeIsRejected(t *testing.T) {
+	url := startRelay(t)
+
+	// Подпись настоящая, но сделана не под тем, что выдал сервер.
+	first := dial(t, url)
+	stolen := receiveKind(t, first, relay.KindChallenge)
+
+	second := dial(t, url)
+	receiveKind(t, second, relay.KindChallenge)
+
+	public, private := keyFor("Alice")
+	payload, err := json.Marshal(relay.HelloPayload{
+		PublicKey: public,
+		Signature: ed25519.Sign(private, stolen.Payload),
+	})
+	if err != nil {
+		t.Fatalf("hello payload failed: %v", err)
+	}
+
+	send(t, second, relay.Envelope{Kind: relay.KindHello, Sender: "Alice", Payload: payload})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if _, _, err := second.Read(ctx); err == nil {
+		t.Fatal("signature made for another challenge was accepted")
+	}
+}
+
+func TestNameBelongsToTheKeyThatClaimedItFirst(t *testing.T) {
+	url := startRelay(t)
+
+	bob := dial(t, url)
+	introduce(t, bob, "Bob")
+	receiveKind(t, bob, relay.KindPresence)
+
+	// Carol называется Bob и честно подписывает вызов — своим ключом.
+	carol := dial(t, url)
+	public, private := keyFor("Carol")
+	introduceWithKey(t, carol, "Bob", public, private)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if _, _, err := carol.Read(ctx); err == nil {
+		t.Fatal("someone else's name was handed out to a different key")
+	}
+}
+
+func TestNameStaysWithItsKeyAfterReconnect(t *testing.T) {
+	url := startRelay(t)
+
+	first := dial(t, url)
+	introduce(t, first, "Bob")
+	receiveKind(t, first, relay.KindPresence)
+	first.Close(websocket.StatusNormalClosure, "")
+
+	// Тот же ключ возвращается под тем же именем — это обычный реконнект.
+	again := dial(t, url)
+	introduce(t, again, "Bob")
+
+	envelope := receiveKind(t, again, relay.KindPresence)
+
+	var names []string
+	if err := json.Unmarshal(envelope.Payload, &names); err != nil {
+		t.Fatalf("presence payload is not a list of names: %v", err)
+	}
+
+	if len(names) != 1 || names[0] != "Bob" {
+		t.Fatalf("expected [Bob], got %v", names)
+	}
+}
+
+func TestSilentClientIsDropped(t *testing.T) {
+	url := startRelay(t)
+
+	quiet := dial(t, url)
+	receiveKind(t, quiet, relay.KindChallenge)
+
+	// Вызов получен, ответа нет — соединение должно закрыться само.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if _, _, err := quiet.Read(ctx); err == nil {
+		t.Fatal("client that never introduced itself stayed connected")
 	}
 }

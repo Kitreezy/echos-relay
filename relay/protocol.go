@@ -6,8 +6,15 @@ import "encoding/json"
 type Kind string
 
 const (
+	// KindChallenge — сервер → клиент: случайная строка, которую нужно
+	// подписать. Уходит первой, сразу после рукопожатия.
+	KindChallenge Kind = "challenge"
+
 	// KindHello — клиент представляется. Приходит при каждом подключении:
 	// после реконнекта сервер о клиенте ничего не помнит.
+	//
+	// В payload лежит HelloPayload — открытый ключ и подпись под nonce.
+	// Одного имени мало: назваться можно кем угодно.
 	KindHello Kind = "hello"
 
 	// KindPresence — список тех, кто сейчас в комнате. Только от сервера.
@@ -50,6 +57,27 @@ func Decode(data []byte) (Envelope, error) {
 
 func (e Envelope) Encode() ([]byte, error) {
 	return json.Marshal(e)
+}
+
+// HelloPayload — то, чем клиент доказывает право на имя.
+//
+// Ключ приходит целиком, а не отпечатком: проверить подпись по отпечатку
+// нельзя, а хранить чужие ключи между запусками релею негде.
+type HelloPayload struct {
+	PublicKey []byte `json:"publicKey"`
+	Signature []byte `json:"signature"`
+}
+
+func DecodeHello(payload []byte) (HelloPayload, error) {
+	var hello HelloPayload
+	err := json.Unmarshal(payload, &hello)
+	return hello, err
+}
+
+// ChallengeEnvelope кладёт nonce прямо в payload, без вложенного JSON:
+// это просто набор байтов, разбирать в нём нечего.
+func ChallengeEnvelope(nonce []byte) Envelope {
+	return Envelope{Kind: KindChallenge, Payload: nonce}
 }
 
 // PresenceEnvelope собирает список присутствующих.

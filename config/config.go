@@ -20,6 +20,10 @@ type Config struct {
 	// MaxMessageBytes — потолок на входящий кадр.
 	MaxMessageBytes int64
 
+	// AuthTimeout — сколько ждать hello с подписью, прежде чем закрыть
+	// соединение.
+	AuthTimeout time.Duration
+
 	// Room — общая комната. Пока одна на всех; когда понадобятся отдельные
 	// чаты, имя переедет в путь запроса.
 	Room string
@@ -31,6 +35,7 @@ func Load() Config {
 		PingInterval:    time.Duration(getEnvInt("PING_INTERVAL_SEC", 20)) * time.Second,
 		PongTimeout:     time.Duration(getEnvInt("PONG_TIMEOUT_SEC", 10)) * time.Second,
 		MaxMessageBytes: int64(getEnvInt("MAX_MESSAGE_KB", 64)) * 1024,
+		AuthTimeout:     time.Duration(getEnvInt("AUTH_TIMEOUT_SEC", 10)) * time.Second,
 		Room:            getEnv("ROOM", "default"),
 	}
 }
