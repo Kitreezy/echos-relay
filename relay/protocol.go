@@ -30,6 +30,13 @@ type Envelope struct {
 	Kind   Kind   `json:"kind"`
 	Sender string `json:"sender"`
 
+	// Recipient — кому предназначено. Пусто — всем, кроме отправителя.
+	//
+	// Нужен для стены: росчерк адресован конкретному человеку, и рассылать
+	// его всем неправильно — при трёх участниках рисунок для одного увидят
+	// остальные.
+	Recipient string `json:"recipient,omitempty"`
+
 	// omitempty важен: в Swift payload объявлен как Data?, и для hello
 	// ключа в JSON нет вовсе.
 	Payload []byte `json:"payload,omitempty"`
