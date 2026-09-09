@@ -1,0 +1,23 @@
+### Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work.sum
+
+# собранный бинарь (имя совпадает с модулем)
+/echos-relay
+
+### macOS
+.DS_Store
+._*
+
+### Secrets & local env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
