@@ -104,6 +104,26 @@ func keyFor(name string) (ed25519.PublicKey, ed25519.PrivateKey) {
 	return private.Public().(ed25519.PublicKey), private
 }
 
+// fingerprintOf — адрес, который релей выведет из ключа с этим именем.
+func fingerprintOf(keyName string) string {
+	public, _ := keyFor(keyName)
+	return relay.Fingerprint(public)
+}
+
+// presenceOf читает список присутствующих.
+func presenceOf(t *testing.T, conn *websocket.Conn) []relay.Participant {
+	t.Helper()
+
+	envelope := receiveKind(t, conn, relay.KindPresence)
+
+	var participants []relay.Participant
+	if err := json.Unmarshal(envelope.Payload, &participants); err != nil {
+		t.Fatalf("presence payload is not a list of participants: %v", err)
+	}
+
+	return participants
+}
+
 // introduce проходит рукопожатие целиком: дожидается вызова и отвечает
 // подписью под ним.
 func introduce(t *testing.T, conn *websocket.Conn, name string) {
@@ -139,23 +159,19 @@ func TestPresenceListsEveryoneWhoIntroducedThemselves(t *testing.T) {
 	introduce(t, alice, "Alice")
 	introduce(t, bob, "Bob")
 
-	envelope := receiveKind(t, alice, relay.KindPresence)
-
-	var names []string
-	if err := json.Unmarshal(envelope.Payload, &names); err != nil {
-		t.Fatalf("presence payload is not a list of names: %v", err)
-	}
-
 	// Список приходит дважды — после каждого hello. Ждём тот, где оба.
-	for len(names) < 2 {
-		envelope = receiveKind(t, alice, relay.KindPresence)
-		if err := json.Unmarshal(envelope.Payload, &names); err != nil {
-			t.Fatalf("presence payload is not a list of names: %v", err)
-		}
+	participants := presenceOf(t, alice)
+	for len(participants) < 2 {
+		participants = presenceOf(t, alice)
 	}
 
-	if len(names) != 2 || names[0] != "Alice" || names[1] != "Bob" {
-		t.Fatalf("expected [Alice Bob], got %v", names)
+	names := map[string]string{}
+	for _, participant := range participants {
+		names[participant.ID] = participant.Name
+	}
+
+	if names[fingerprintOf("Alice")] != "Alice" || names[fingerprintOf("Bob")] != "Bob" {
+		t.Fatalf("expected Alice and Bob with their own fingerprints, got %v", participants)
 	}
 }
 
@@ -182,8 +198,8 @@ func TestMessageReachesTheOtherClient(t *testing.T) {
 	}
 }
 
-// Имя в конверте — то, чем клиент назвался при подключении, а не то,
-// что он написал в поле sender.
+// Отправитель в конверте — отпечаток ключа, которым клиент подтвердил
+// подключение, а не то, что он написал в поле sender.
 func TestSenderIsStampedByServer(t *testing.T) {
 	url := startRelay(t)
 
@@ -196,14 +212,14 @@ func TestSenderIsStampedByServer(t *testing.T) {
 
 	send(t, mallory, relay.Envelope{
 		Kind:    relay.KindMessage,
-		Sender:  "Alice", // выдаёт себя за другого
+		Sender:  fingerprintOf("Alice"), // выдаёт себя за другого
 		Payload: []byte(`{}`),
 	})
 
 	envelope := receiveKind(t, bob, relay.KindMessage)
 
-	if envelope.Sender != "Mallory" {
-		t.Fatalf("expected Mallory, got %q", envelope.Sender)
+	if envelope.Sender != fingerprintOf("Mallory") {
+		t.Fatalf("expected Mallory's fingerprint, got %q", envelope.Sender)
 	}
 }
 
@@ -266,14 +282,9 @@ func TestLeavingUpdatesPresence(t *testing.T) {
 	bob.Close(websocket.StatusNormalClosure, "")
 
 	for {
-		envelope := receiveKind(t, alice, relay.KindPresence)
+		participants := presenceOf(t, alice)
 
-		var names []string
-		if err := json.Unmarshal(envelope.Payload, &names); err != nil {
-			t.Fatalf("presence payload is not a list of names: %v", err)
-		}
-
-		if len(names) == 1 && names[0] == "Alice" {
+		if len(participants) == 1 && participants[0].ID == fingerprintOf("Alice") {
 			return
 		}
 	}
@@ -310,14 +321,14 @@ func TestAddressedEnvelopeReachesOnlyRecipient(t *testing.T) {
 	send(t, alice, relay.Envelope{
 		Kind:      relay.KindStroke,
 		Sender:    "Alice",
-		Recipient: "Bob",
+		Recipient: fingerprintOf("Bob"),
 		Payload:   []byte(`{"points":[]}`),
 	})
 
 	// Bob получает
 	envelope := receiveKind(t, bob, relay.KindStroke)
-	if envelope.Sender != "Alice" {
-		t.Fatalf("expected Alice, got %q", envelope.Sender)
+	if envelope.Sender != fingerprintOf("Alice") {
+		t.Fatalf("expected Alice's fingerprint, got %q", envelope.Sender)
 	}
 
 	// Carol — нет
@@ -374,7 +385,7 @@ func TestEnvelopeForAbsentRecipientIsDropped(t *testing.T) {
 	send(t, alice, relay.Envelope{
 		Kind:      relay.KindStroke,
 		Sender:    "Alice",
-		Recipient: "Nobody",
+		Recipient: fingerprintOf("Nobody"),
 		Payload:   []byte(`{"points":[]}`),
 	})
 
@@ -440,27 +451,91 @@ func TestSignatureFromAnotherChallengeIsRejected(t *testing.T) {
 	}
 }
 
-func TestNameBelongsToTheKeyThatClaimedItFirst(t *testing.T) {
+func TestSameNameFromTwoKeysIsTwoPeople(t *testing.T) {
 	url := startRelay(t)
 
 	bob := dial(t, url)
 	introduce(t, bob, "Bob")
-	receiveKind(t, bob, relay.KindPresence)
 
-	// Carol называется Bob и честно подписывает вызов — своим ключом.
+	// Carol называется Bob — и это её право: имя ничего не решает.
 	carol := dial(t, url)
 	public, private := keyFor("Carol")
 	introduceWithKey(t, carol, "Bob", public, private)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	participants := presenceOf(t, bob)
+	for len(participants) < 2 {
+		participants = presenceOf(t, bob)
+	}
 
-	if _, _, err := carol.Read(ctx); err == nil {
-		t.Fatal("someone else's name was handed out to a different key")
+	if len(participants) != 2 {
+		t.Fatalf("expected two participants, got %v", participants)
+	}
+
+	for _, participant := range participants {
+		if participant.Name != "Bob" {
+			t.Fatalf("both are named Bob, got %v", participants)
+		}
+	}
+
+	if participants[0].ID == participants[1].ID {
+		t.Fatal("two different keys ended up with the same address")
 	}
 }
 
-func TestNameStaysWithItsKeyAfterReconnect(t *testing.T) {
+func TestAddressedEnvelopeGoesByKeyNotByName(t *testing.T) {
+	url := startRelay(t)
+
+	alice := dial(t, url)
+	realBob := dial(t, url)
+	impostor := dial(t, url)
+
+	introduce(t, alice, "Alice")
+	introduce(t, realBob, "Bob")
+
+	// Самозванец берёт то же имя, но ключ у него свой.
+	public, private := keyFor("Carol")
+	introduceWithKey(t, impostor, "Bob", public, private)
+
+	waitForPresence(t, alice, 3)
+
+	send(t, alice, relay.Envelope{
+		Kind:      relay.KindMessage,
+		Recipient: fingerprintOf("Bob"),
+		Payload:   []byte(`{"text":"для настоящего Bob"}`),
+	})
+
+	envelope := receiveKind(t, realBob, relay.KindMessage)
+	if envelope.Sender != fingerprintOf("Alice") {
+		t.Fatalf("expected Alice's fingerprint as sender, got %q", envelope.Sender)
+	}
+
+	// Самозванцу не досталось ничего, хотя имя у него то же самое.
+	// Присутствие не в счёт: его получают все.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	for {
+		_, data, err := impostor.Read(ctx)
+		if err != nil {
+			break
+		}
+
+		leaked, err := relay.Decode(data)
+		if err == nil && leaked.Kind != relay.KindPresence {
+			t.Fatalf("envelope addressed to Bob's key reached someone else with Bob's name: %s",
+				leaked.Kind)
+		}
+	}
+}
+
+func waitForPresence(t *testing.T, conn *websocket.Conn, count int) {
+	t.Helper()
+
+	for len(presenceOf(t, conn)) < count {
+	}
+}
+
+func TestAddressSurvivesReconnect(t *testing.T) {
 	url := startRelay(t)
 
 	first := dial(t, url)
@@ -472,15 +547,10 @@ func TestNameStaysWithItsKeyAfterReconnect(t *testing.T) {
 	again := dial(t, url)
 	introduce(t, again, "Bob")
 
-	envelope := receiveKind(t, again, relay.KindPresence)
+	participants := presenceOf(t, again)
 
-	var names []string
-	if err := json.Unmarshal(envelope.Payload, &names); err != nil {
-		t.Fatalf("presence payload is not a list of names: %v", err)
-	}
-
-	if len(names) != 1 || names[0] != "Bob" {
-		t.Fatalf("expected [Bob], got %v", names)
+	if len(participants) != 1 || participants[0].ID != fingerprintOf("Bob") {
+		t.Fatalf("expected Bob under his own address, got %v", participants)
 	}
 }
 

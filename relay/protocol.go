@@ -28,16 +28,32 @@ const (
 	KindStroke Kind = "stroke"
 )
 
+// Participant — один человек в комнате.
+//
+// Имя и адрес разделены намеренно. Имя человек выбирает сам, оно может
+// повторяться и меняться; адрес — отпечаток ключа, он уникален и подделать
+// его нельзя, не имея закрытой части.
+type Participant struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 // Envelope — то, что ходит по сокету.
 //
 // Payload — это []byte, и Go кодирует его в base64, как и JSONEncoder в Swift
 // для типа Data. Поэтому вложенный JSON (MessagePayload, TypingEvent, список
 // имён) сервер не разбирает вообще: он его пересылает как есть.
 type Envelope struct {
-	Kind   Kind   `json:"kind"`
+	Kind Kind `json:"kind"`
+
+	// Sender — отпечаток ключа отправителя, а не имя. Сервер проставляет его
+	// сам, из того ключа, которым клиент подтвердил подключение.
+	//
+	// Имя для этого не годится: назваться Bob может кто угодно, и входящее
+	// от самозванца легло бы в переписку с настоящим Bob.
 	Sender string `json:"sender"`
 
-	// Recipient — кому предназначено. Пусто — всем, кроме отправителя.
+	// Recipient — отпечаток получателя. Пусто — всем, кроме отправителя.
 	//
 	// Нужен для стены: росчерк адресован конкретному человеку, и рассылать
 	// его всем неправильно — при трёх участниках рисунок для одного увидят
@@ -81,8 +97,8 @@ func ChallengeEnvelope(nonce []byte) Envelope {
 }
 
 // PresenceEnvelope собирает список присутствующих.
-func PresenceEnvelope(names []string) (Envelope, error) {
-	payload, err := json.Marshal(names)
+func PresenceEnvelope(participants []Participant) (Envelope, error) {
+	payload, err := json.Marshal(participants)
 	if err != nil {
 		return Envelope{}, err
 	}
@@ -92,9 +108,9 @@ func PresenceEnvelope(names []string) (Envelope, error) {
 
 // StampedBy возвращает копию с подставленным отправителем.
 //
-// Имя берётся из того, чем клиент представился при подключении, а не из
-// конверта: содержимому от клиента доверять нельзя, назваться можно кем угодно.
-func (e Envelope) StampedBy(sender string) Envelope {
-	e.Sender = sender
+// Отпечаток берётся из ключа, которым клиент подтвердил подключение, а не из
+// конверта: содержимому от клиента доверять нельзя.
+func (e Envelope) StampedBy(fingerprint string) Envelope {
+	e.Sender = fingerprint
 	return e
 }

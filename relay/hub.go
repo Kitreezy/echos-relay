@@ -1,9 +1,9 @@
 package relay
 
 import (
-	"errors"
 	"log"
 	"slices"
+	"strings"
 	"sync"
 )
 
@@ -62,65 +62,26 @@ type Hub struct {
 	clients map[uint64]*Client
 	lastID  uint64
 
-	// reserved — имя → отпечаток ключа, который его занял.
-	//
-	// Запись переживает уход клиента: иначе имя освобождалось бы вместе с
-	// соединением, и достаточно было бы дождаться, пока Bob выйдет. А вот
-	// перезапуск релея она не переживает — тогда имена свободны заново.
-	reserved map[string]string
-
 	// sendQueueSize — насколько клиент может отстать, прежде чем его отключат.
 	sendQueueSize int
-
-	// maxReserved — потолок на число занятых имён. Записи никто не удаляет,
-	// а придумать имя может кто угодно, так что предел нужен.
-	maxReserved int
 }
-
-var (
-	// ErrNameTaken — имя занято другим ключом.
-	ErrNameTaken = errors.New("name is taken by another key")
-
-	// ErrTooManyNames — свободных мест в реестре имён не осталось.
-	ErrTooManyNames = errors.New("name registry is full")
-)
 
 func NewHub() *Hub {
 	return &Hub{
 		clients:       make(map[uint64]*Client),
-		reserved:      make(map[string]string),
 		sendQueueSize: 32,
-		maxReserved:   10_000,
 	}
 }
 
-// Claim закрепляет имя за ключом.
+// Register закрепляет за клиентом его личность.
 //
-// Первый, кто назвался этим именем, его и держит. Второй с другим ключом
-// получает отказ, даже если первого сейчас нет на связи: адресный конверт
-// для Bob должен приходить тому же Bob, что и вчера.
+// Реестра имён здесь нет и не нужно: адресуют по отпечатку ключа, а имя —
+// подпись на экране. Два человека могут называться одинаково, и ничего от
+// этого не сломается: конверт всё равно уйдёт тому, чей отпечаток указан.
 //
-// Подпись под nonce к этому моменту уже проверена — здесь решается только
-// вопрос, кому принадлежит имя.
-func (h *Hub) Claim(name string, publicKey []byte, client *Client) error {
-	fingerprint := Fingerprint(publicKey)
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if owner, exists := h.reserved[name]; exists {
-		if owner != fingerprint {
-			return ErrNameTaken
-		}
-	} else {
-		if len(h.reserved) >= h.maxReserved {
-			return ErrTooManyNames
-		}
-		h.reserved[name] = fingerprint
-	}
-
-	client.setIdentity(name, fingerprint)
-	return nil
+// Подпись под nonce к этому моменту уже проверена.
+func (h *Hub) Register(name string, publicKey []byte, client *Client) {
+	client.setIdentity(name, Fingerprint(publicKey))
 }
 
 func (h *Hub) Add() *Client {
@@ -150,31 +111,44 @@ func (h *Hub) Remove(client *Client) {
 	close(client.Send)
 
 	if client.HasIntroduced() {
-		log.Printf("'%s' left", client.Name())
+		log.Printf("'%s' left (%s)", client.Name(), client.Fingerprint())
 		h.BroadcastPresence()
 	}
 }
 
-// Presence — имена представившихся, по алфавиту.
+// Presence — представившиеся, по отпечатку.
 //
 // Порядок стабильный намеренно: клиент сравнивает списки, чтобы не дёргать
 // UI на одинаковых обновлениях, а со случайным порядком это не работает.
-func (h *Hub) Presence() []string {
+// Сортировка по отпечатку, а не по имени: имена могут совпадать.
+func (h *Hub) Presence() []Participant {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	names := make([]string, 0, len(h.clients))
+	seen := make(map[string]bool, len(h.clients))
+	participants := make([]Participant, 0, len(h.clients))
+
 	for _, client := range h.clients {
-		if name := client.Name(); name != "" {
-			names = append(names, name)
+		fingerprint := client.Fingerprint()
+
+		// Один ключ может держать два соединения разом: старое ещё не убрано,
+		// а клиент уже переподключился. В списке это один человек.
+		if fingerprint == "" || seen[fingerprint] {
+			continue
 		}
+
+		seen[fingerprint] = true
+		participants = append(participants, Participant{
+			ID:   fingerprint,
+			Name: client.Name(),
+		})
 	}
 
-	slices.Sort(names)
+	slices.SortFunc(participants, func(a, b Participant) int {
+		return strings.Compare(a.ID, b.ID)
+	})
 
-	// Одно имя может держать два соединения разом: старое ещё не убрано, а
-	// клиент уже переподключился. В списке это должен быть один человек.
-	return slices.Compact(names)
+	return participants
 }
 
 func (h *Hub) BroadcastPresence() {
@@ -212,22 +186,27 @@ func (h *Hub) Relay(data []byte, from *Client) {
 	}
 }
 
-// RelayTo отправляет конверт одному получателю.
+// RelayTo отправляет конверт одному получателю — по отпечатку его ключа.
 //
-// Если такого имени на релее нет, конверт молча пропадает: очереди для
+// Если такого отпечатка на релее нет, конверт молча пропадает: очереди для
 // отсутствующих мы не держим, а клиент всё равно сохранил росчерк у себя.
+//
+// Отправляется всем соединениям с этим отпечатком, а не первому попавшемуся:
+// в момент переподключения их бывает два, и угадывать живое незачем.
 func (h *Hub) RelayTo(data []byte, recipient string, from *Client) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
+	delivered := false
+
 	for _, client := range h.clients {
-		if client.ID != from.ID && client.Name() == recipient {
+		if client.ID != from.ID && client.Fingerprint() == recipient {
 			h.enqueue(client, data)
-			return true
+			delivered = true
 		}
 	}
 
-	return false
+	return delivered
 }
 
 // enqueue кладёт в очередь клиента, не блокируясь.

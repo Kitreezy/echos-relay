@@ -95,9 +95,9 @@ func (h *WS) read(ctx context.Context, conn *websocket.Conn, client *relay.Clien
 				continue // не представился — не обслуживаем
 			}
 
-			// Отправителя проставляем сами: в конверте от клиента может
-			// стоять чужое имя.
-			stamped, err := envelope.StampedBy(client.Name()).Encode()
+			// Отправителя проставляем сами, отпечатком: в конверте от
+			// клиента может стоять чужой адрес.
+			stamped, err := envelope.StampedBy(client.Fingerprint()).Encode()
 			if err != nil {
 				log.Printf("encode failed: %v", err)
 				continue
@@ -107,7 +107,7 @@ func (h *WS) read(ctx context.Context, conn *websocket.Conn, client *relay.Clien
 			// росчерк на стене Bob — не дело Carol.
 			if envelope.Recipient != "" {
 				if !h.Hub.RelayTo(stamped, envelope.Recipient, client) {
-					log.Printf("'%s' is not here, dropping %s from '%s'",
+					log.Printf("%s is not here, dropping %s from '%s'",
 						envelope.Recipient, envelope.Kind, client.Name())
 				}
 				continue
@@ -121,11 +121,13 @@ func (h *WS) read(ctx context.Context, conn *websocket.Conn, client *relay.Clien
 	}
 }
 
-// authenticate проверяет hello: подпись под выданным nonce и право на имя.
+// authenticate проверяет hello: подпись под выданным nonce.
 //
-// Отказ означает разрыв соединения, а не пропуск конверта. Клиент, который
-// не смог подтвердить имя, не станет обслуживаемым позже — держать его на
-// линии не за чем, а закрытие он увидит сразу.
+// Имя при этом ни с чем не сверяется — оно ничего не решает. Проверяется
+// ключ, и из него получается адрес, по которому клиенту будут писать.
+//
+// Отказ означает разрыв соединения, а не пропуск конверта: клиент, не
+// подтвердивший ключ, не станет обслуживаемым позже.
 func (h *WS) authenticate(conn *websocket.Conn, client *relay.Client, envelope relay.Envelope) bool {
 	if envelope.Sender == "" {
 		conn.Close(websocket.StatusPolicyViolation, "empty name")
@@ -145,12 +147,7 @@ func (h *WS) authenticate(conn *websocket.Conn, client *relay.Client, envelope r
 		return false
 	}
 
-	if err := h.Hub.Claim(envelope.Sender, hello.PublicKey, client); err != nil {
-		log.Printf("'%s' rejected: %v", envelope.Sender, err)
-		conn.Close(websocket.StatusPolicyViolation, err.Error())
-		return false
-	}
-
+	h.Hub.Register(envelope.Sender, hello.PublicKey, client)
 	return true
 }
 
