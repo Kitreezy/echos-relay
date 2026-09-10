@@ -5,8 +5,25 @@ linters:
   enable:
     - bodyclose
     - misspell
+  settings:
+    errcheck:
+      # Закрытие сокета случается на разрыве и в defer: сделать с ошибкой
+      # уже нечего, а девять проверок подряд читаются хуже, чем их отсутствие.
+      exclude-functions:
+        - (*github.com/coder/websocket.Conn).Close
   exclusions:
     rules:
       - path: _test\.go$
         linters:
           - errcheck
+      # У вебсокета тело ответа — это само соединение, и закрыть его
+      # значит оборвать связь сразу после рукопожатия.
+      - path: _test\.go$
+        linters:
+          - bodyclose
+
+issues:
+  # По умолчанию линтер показывает не больше трёх одинаковых замечаний
+  # и молча прячет остальные — в логе CI это выглядит так, будто их и нет.
+  max-same-issues: 0
+  max-issues-per-linter: 0
