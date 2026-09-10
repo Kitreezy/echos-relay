@@ -568,3 +568,55 @@ func TestSilentClientIsDropped(t *testing.T) {
 		t.Fatal("client that never introduced itself stayed connected")
 	}
 }
+
+// Стена сверяется напрямую с владельцем: просьба и ответ адресные, и
+// посторонних они не касаются.
+func TestWallExchangeIsAddressed(t *testing.T) {
+	url := startRelay(t)
+
+	alice := dial(t, url)
+	bob := dial(t, url)
+	carol := dial(t, url)
+
+	introduce(t, alice, "Alice")
+	introduce(t, bob, "Bob")
+	introduce(t, carol, "Carol")
+	waitForPresence(t, carol, 3)
+
+	send(t, alice, relay.Envelope{
+		Kind:      relay.KindWallRequest,
+		Recipient: fingerprintOf("Bob"),
+	})
+
+	asked := receiveKind(t, bob, relay.KindWallRequest)
+	if asked.Sender != fingerprintOf("Alice") {
+		t.Fatalf("expected Alice's fingerprint, got %q", asked.Sender)
+	}
+
+	send(t, bob, relay.Envelope{
+		Kind:      relay.KindWallState,
+		Recipient: fingerprintOf("Alice"),
+		Payload:   []byte(`[{"id":"1"}]`),
+	})
+
+	answered := receiveKind(t, alice, relay.KindWallState)
+	if string(answered.Payload) != `[{"id":"1"}]` {
+		t.Fatalf("wall state mangled: %s", answered.Payload)
+	}
+
+	// Carol не касается ни просьба, ни ответ.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	for {
+		_, data, err := carol.Read(ctx)
+		if err != nil {
+			return
+		}
+
+		leaked, err := relay.Decode(data)
+		if err == nil && leaked.Kind != relay.KindPresence {
+			t.Fatalf("someone else's wall leaked to Carol: %s", leaked.Kind)
+		}
+	}
+}
