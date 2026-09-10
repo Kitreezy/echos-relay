@@ -72,7 +72,9 @@ func TestIdentityIsStableForTheSameName(t *testing.T) {
 
 // Ради -fresh: тёзка отличается от знакомого именно ключом.
 func TestFreshIdentityDiffersEveryTime(t *testing.T) {
-	if freshIdentity().fingerprint() == freshIdentity().fingerprint() {
+	first, second := freshIdentity().fingerprint(), freshIdentity().fingerprint()
+
+	if first == second {
 		t.Fatal("новый ключ должен быть новым")
 	}
 }

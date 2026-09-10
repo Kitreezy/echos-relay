@@ -48,17 +48,15 @@ jobs:
 
   lint:
     docker:
-      # Тег стоит прибить к конкретной версии, как только определишься
-      # с ней: на latest линтер приносит новые замечания сам по себе.
-      - image: golangci/golangci-lint:latest-alpine
+      # Версия прибита: на latest линтер приносит новые замечания сам
+      # по себе, и сборка краснеет без единой правки в коде.
+      - image: golangci/golangci-lint:v2.13.2-alpine
     working_directory: ~/echos-relay
     steps:
       - checkout
       - run:
           name: golangci-lint
-          # Пока замечания линтера не разобраны, джоба не валит workflow.
-          # Убрать `|| true`, когда `golangci-lint run` пройдёт вчистую.
-          command: golangci-lint run --timeout 5m || true
+          command: golangci-lint run --timeout 5m
 
   test:
     executor: go

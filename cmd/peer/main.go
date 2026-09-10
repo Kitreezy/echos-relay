@@ -152,19 +152,25 @@ func (p *peer) listen(ctx context.Context) {
 
 		case relay.KindMessage:
 			var message Message
-			json.Unmarshal(envelope.Payload, &message)
+			if json.Unmarshal(envelope.Payload, &message) != nil {
+				continue
+			}
 			fmt.Printf("\n[%s] %s\n> ", p.nameOf(envelope.Sender), message.Text)
 
 		case relay.KindTyping:
 			var typing Typing
-			json.Unmarshal(envelope.Payload, &typing)
+			if json.Unmarshal(envelope.Payload, &typing) != nil {
+				continue
+			}
 			if typing.Type == "start" {
 				fmt.Printf("\n%s печатает…\n> ", p.nameOf(envelope.Sender))
 			}
 
 		case relay.KindStroke:
 			var stroke Stroke
-			json.Unmarshal(envelope.Payload, &stroke)
+			if json.Unmarshal(envelope.Payload, &stroke) != nil {
+				continue
+			}
 			p.mu.Lock()
 			p.wall = append(p.wall, stroke)
 			count := len(p.wall)
@@ -177,7 +183,9 @@ func (p *peer) listen(ctx context.Context) {
 
 		case relay.KindWallState:
 			var strokes []Stroke
-			json.Unmarshal(envelope.Payload, &strokes)
+			if json.Unmarshal(envelope.Payload, &strokes) != nil {
+				continue
+			}
 			fmt.Printf("\nстена %s: %d росчерков\n> ",
 				p.nameOf(envelope.Sender), len(strokes))
 		}
@@ -214,11 +222,13 @@ func (p *peer) answerWall(ctx context.Context, asker string) {
 		return
 	}
 
-	p.send(ctx, relay.Envelope{
+	if err := p.send(ctx, relay.Envelope{
 		Kind:      relay.KindWallState,
 		Recipient: asker,
 		Payload:   payload,
-	})
+	}); err != nil {
+		fmt.Println("\nне отправилось:", err)
+	}
 
 	fmt.Printf("\n%s спросил стену, отдал %d росчерков\n> ",
 		p.nameOf(asker), len(wall))
@@ -368,11 +378,13 @@ func (p *peer) say(ctx context.Context, text string) {
 		Timestamp:  float64(time.Now().UnixNano()) / 1e9,
 	})
 
-	p.send(ctx, relay.Envelope{
+	if err := p.send(ctx, relay.Envelope{
 		Kind:      relay.KindMessage,
 		Recipient: target,
 		Payload:   payload,
-	})
+	}); err != nil {
+		fmt.Println("\nне отправилось:", err)
+	}
 }
 
 func (p *peer) typing(ctx context.Context, state string) {
@@ -392,11 +404,13 @@ func (p *peer) typing(ctx context.Context, state string) {
 		Timestamp: float64(time.Now().UnixNano()) / 1e9,
 	})
 
-	p.send(ctx, relay.Envelope{
+	if err := p.send(ctx, relay.Envelope{
 		Kind:      relay.KindTyping,
 		Recipient: target,
 		Payload:   payload,
-	})
+	}); err != nil {
+		fmt.Println("\nне отправилось:", err)
+	}
 }
 
 // draw рисует диагональ через всю стену.
@@ -412,11 +426,13 @@ func (p *peer) draw(ctx context.Context) {
 	stroke := newStroke(p.me.fingerprint(), diagonal())
 	payload, _ := json.Marshal(stroke)
 
-	p.send(ctx, relay.Envelope{
+	if err := p.send(ctx, relay.Envelope{
 		Kind:      relay.KindStroke,
 		Recipient: target,
 		Payload:   payload,
-	})
+	}); err != nil {
+		fmt.Println("\nне отправилось:", err)
+	}
 
 	fmt.Printf("  нарисовал у %s\n", p.nameOf(target))
 }
@@ -427,7 +443,9 @@ func (p *peer) askWall(ctx context.Context) {
 		return
 	}
 
-	p.send(ctx, relay.Envelope{Kind: relay.KindWallRequest, Recipient: target})
+	if err := p.send(ctx, relay.Envelope{Kind: relay.KindWallRequest, Recipient: target}); err != nil {
+		fmt.Println("\nне отправилось:", err)
+	}
 	fmt.Printf("  спросил стену у %s\n", p.nameOf(target))
 }
 
