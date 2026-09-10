@@ -1,0 +1,152 @@
+version: 2.1
+
+# Патч-версия зафиксирована: в go.mod стоит go 1.26.4, и более старый
+# тулчейн в образе полез бы докачивать нужный на каждой джобе.
+executors:
+  go:
+    docker:
+      - image: golang:1.26.4
+    working_directory: ~/echos-relay
+
+commands:
+  restore_go_cache:
+    steps:
+      - restore_cache:
+          keys:
+            - go-{{ checksum "go.sum" }}
+            # Запасной ключ: зависимости не совпали, но кэш сборки
+            # всё равно ускорит компиляцию.
+            - go-
+
+  save_go_cache:
+    steps:
+      - save_cache:
+          key: go-{{ checksum "go.sum" }}
+          paths:
+            - /go/pkg/mod
+            - /root/.cache/go-build
+
+jobs:
+  check:
+    executor: go
+    steps:
+      - checkout
+      - restore_go_cache
+      - run:
+          name: Форматирование
+          command: |
+            unformatted=$(gofmt -l .)
+            if [ -n "$unformatted" ]; then
+              echo "Не отформатировано:"
+              echo "$unformatted"
+              exit 1
+            fi
+      - run:
+          name: go vet
+          command: go vet ./...
+      - save_go_cache
+
+  lint:
+    docker:
+      # Тег стоит прибить к конкретной версии, как только определишься
+      # с ней: на latest линтер приносит новые замечания сам по себе.
+      - image: golangci/golangci-lint:latest-alpine
+    working_directory: ~/echos-relay
+    steps:
+      - checkout
+      - run:
+          name: golangci-lint
+          # Пока замечания линтера не разобраны, джоба не валит workflow.
+          # Убрать `|| true`, когда `golangci-lint run` пройдёт вчистую.
+          command: golangci-lint run --timeout 5m || true
+
+  test:
+    executor: go
+    steps:
+      - checkout
+      - restore_go_cache
+      - run:
+          name: Тесты с гонками и покрытием
+          command: |
+            mkdir -p /tmp/test-results
+            go install gotest.tools/gotestsum@v1.13.0
+            gotestsum --junitfile /tmp/test-results/report.xml --format testname \
+              -- -race -covermode=atomic -coverprofile=/tmp/coverage.out ./...
+      - run:
+          name: Покрытие
+          command: go tool cover -func=/tmp/coverage.out | tail -1
+      # Отчёт разбирается CircleCI: упавший тест виден отдельным блоком,
+      # а не только в логе.
+      - store_test_results:
+          path: /tmp/test-results
+      - store_artifacts:
+          path: /tmp/coverage.out
+      - save_go_cache
+
+  build:
+    executor: go
+    steps:
+      - checkout
+      - restore_go_cache
+      - run:
+          name: Сборка
+          command: CGO_ENABLED=0 go build -ldflags="-s -w" -o /tmp/echos-relay ./main.go
+      - store_artifacts:
+          path: /tmp/echos-relay
+      - save_go_cache
+
+  image:
+    # Docker-исполнитель плюс remote docker: отдельная виртуалка под
+    # сборку образа не нужна и кредитов тратится меньше.
+    docker:
+      - image: cimg/base:current
+    working_directory: ~/echos-relay
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Сборка образа
+          command: |
+            tag=${CIRCLE_TAG:-latest}
+            docker build -f Containerfile -t echos-relay:"$tag" .
+      - run:
+          name: Публикация в ghcr.io
+          # Пуш включается сам, когда в переменных проекта появится
+          # GHCR_TOKEN (classic PAT с правом write:packages).
+          command: |
+            if [ -z "$GHCR_TOKEN" ]; then
+              echo "GHCR_TOKEN не задан — образ собран, но не опубликован"
+              exit 0
+            fi
+            tag=${CIRCLE_TAG:-latest}
+            name=ghcr.io/$(echo "$CIRCLE_PROJECT_USERNAME" | tr 'A-Z' 'a-z')/echos-relay
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$CIRCLE_PROJECT_USERNAME" --password-stdin
+            docker tag echos-relay:"$tag" "$name:$tag"
+            docker tag echos-relay:"$tag" "$name:$CIRCLE_SHA1"
+            docker push "$name:$tag"
+            docker push "$name:$CIRCLE_SHA1"
+
+workflows:
+  # Теги приходится разрешать в каждой джобе: по умолчанию CircleCI
+  # запускает workflow только на ветках.
+  pipeline:
+    jobs:
+      - check:
+          filters: &always
+            tags:
+              only: /^v.*/
+      - lint:
+          filters: *always
+      - test:
+          requires: [check]
+          filters: *always
+      - build:
+          requires: [test]
+          filters: *always
+      - image:
+          requires: [build]
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              only: main
